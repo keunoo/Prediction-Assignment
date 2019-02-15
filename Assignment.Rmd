@@ -1,0 +1,265 @@
+---
+title: "Assignment"
+author: "Keunoo Chang"
+date: "14/02/2019"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+getwd()
+setwd(dir="/Users/keunoo/R/Coursera")
+rm(list=ls())
+```
+
+Load libraries
+```{r cars}
+library(stringr)
+library(ggplot2)
+library(caret)
+library(rpart)
+library(rpart.plot)
+```
+
+## DATA EXPLORATION
+
+Load the data and display summary statistics for each variable.
+```{r}
+data_full <- read.csv(file = "/Users/keunoo/R/Coursera/pml-training.csv")
+data_test <- read.csv(file = "/Users/keunoo/R/Coursera/pml-testing.csv")
+```
+The summary indicates that there are many variables to take account and there are many non valid variables for modeling : either too many NA or too many blank values. 
+The objective is to have a final clean database with less columns if needed.
+Considering the high number of columns (160) we arbitrarily decide to remove those many NA or blank values containing columns.
+
+Preliminary analysis
+```{r}
+head(data_full)
+dim(data_full)
+summary(data_full)
+names(data_full)
+sapply(data_full, class) 
+```
+We observe that those variables containing a lot blank values are considered as factor.
+
+Analysis of NA values
+```{r}
+colSums(is.na(data_full))
+```
+This function helps us to detect NA values contaning columns.
+
+Adjustments of the data to remove non numeric, NA dense and non blank variables.
+Also we remove the first column and the time stamp related variables assuming the target values do not depend of the time.
+```{r}
+# get numeric var names
+numeric.vars <-names(data_full)[sapply(data_full, class) %in% c("integer", "numeric")] 
+# get only numeric variables
+data_num <- data_full[, c(numeric.vars,"classe")] 
+
+# get valid vars
+valid.vars <-names(data_num)[colSums(is.na(data_num)) %in% c(0)] 
+# get only valid variables
+data_valid <- data_num[, valid.vars] 
+
+#remove X and time stamp variables
+final.vars <- setdiff(colnames(data_valid),c("X","raw_timestamp_part_1","raw_timestamp_part_2"))
+data_final <- data_valid[, final.vars] # get only final variables
+```
+
+Results of the adjustments
+```{r}
+summary(data_final)
+dim(data_final)
+head(data_final)
+```
+
+Our final database which we will base our model have 54 columns whereas we had 160 initially.
+If modeling gets poor results, we might need to include back some variables.
+
+Correlation analysis : check if some variables have strong correlation
+```{r}
+cor.data <- data.frame(round(cor(data_final[, -c(54)]), 2)) 
+cor.data
+library(corrplot)
+corrplot(cor(data_final[, -c(54)]))
+#pairs(data_final[, c(1,2)])
+```
+Some correlations can be visualized among variables.
+
+## PLOTS
+
+Plot the target values by count
+```{r}
+ggplot(data=data_final, mapping = aes(x=classe)) + geom_bar()
+```
+
+Plot the target by numerical variable (boxplot)
+```{r}
+dim(data_final)
+for (i in c(1:2))
+{
+  plot <- ggplot(data=data_final, mapping = aes(x=classe, y = data_final[,i], fill = classe)) + geom_boxplot() + labs(x = colnames(data_final)[i])
+  print(plot)
+}
+```
+We observe that it is not easy to detect a clear pattern between the classe value and any of the variable taken indendently even though some graphs some strong correlation between the median and the classe : for example for the roll_belt variable, A classe has clearly a lower median vs the others.
+
+## BUILD MODELS
+
+Data partition using caret package
+```{r}
+partition <- createDataPartition(data_final$classe, list = FALSE, p = .75)
+data.train <- data_final[partition, ]
+data.test <- data_final[-partition, ]
+
+table(data.train$classe) / nrow(data.train)
+table(data.test$classe) / nrow(data.test)
+```
+
+We verify that all classes are distributed the same way between training and testing sets.
+
+### Model 1 - Decision tree
+
+First tree with light parameters
+```{r}
+dt <- rpart(classe ~ ., 
+            data = data.train,
+            control = rpart.control(minbucket = 5, cp = .02, maxdepth = 5),
+            parms = list(split = "gini"))
+
+rpart.plot(dt)
+
+#Obtain the confusion matrix against the training and validation sets.
+
+print("Training confusion matrix")
+predicted <- predict(dt, type = "class")
+confusionMatrix(predicted, factor(data.train$classe)) 
+
+print("Test confusion matrix")
+predicted <- predict(dt, newdata = data.test, type = "class")
+confusionMatrix(predicted, factor(data.test$classe)) 
+
+```
+Accuracy equals to 54%.
+
+More complex tree
+```{r}
+dt <- rpart(classe ~ ., 
+            data = data.train,
+            control = rpart.control(minbucket = 5, cp = .001, maxdepth = 10),
+            parms = list(split = "gini"))
+
+#rpart.plot(dt)
+
+print("Training confusion matrix")
+predicted <- predict(dt, type = "class")
+confusionMatrix(predicted, factor(data.train$classe)) 
+
+print("Test confusion matrix")
+predicted <- predict(dt, newdata = data.test, type = "class")
+confusionMatrix(predicted, factor(data.test$classe)) 
+
+```
+Accuracy has improved to 85%.
+
+This chunk prunes the tree using the optimal complexity parameter and computes the confusion matrices.
+```{r}
+dt2 <- prune(dt, cp = dt$cptable[which.min(dt$cptable[, "xerror"]), "CP"])
+
+#rpart.plot(dt2)
+
+print("Training confusion matrix")
+predicted <- predict(dt2, type = "class")
+confusionMatrix(predicted, factor(data.train$classe)) 
+
+print("Test confusion matrix")
+predicted <- predict(dt2, newdata = data.test, type = "class")
+confusionMatrix(predicted, factor(data.test$classe)) 
+```
+Accuracy has improved to 85%.
+
+This chunk selects the complexity parameter using cross validation.
+```{r}
+Grid <- expand.grid(cp=seq(0, 0.2, 0.001))
+fitControl <- trainControl(method = "cv", number = 6)
+dt3 <- train(factor(classe)~.,
+                data=data.train,
+                method='rpart',
+                trControl = fitControl,
+                metric = "Accuracy",
+                tuneGrid = Grid,
+                na.action = na.omit,
+                parms=list(split='Gini'))
+
+#dt3$finalModel 
+
+#plot(dt3)
+#rpart.plot(dt3$finalModel, extra=4)
+
+print("Training confusion matrix")
+predicted <- predict(dt3, type = "raw")
+confusionMatrix(predicted, factor(data.train$classe)) 
+
+print("Test confusion matrix")
+predicted <- predict(dt3, newdata = data.test, type = "raw")
+confusionMatrix(predicted, factor(data.test$classe)) 
+```
+Final accuracy with cross validation ends up with 97%.
+
+### Model 2 - Random forest classification
+
+Train a random forest using cross validation
+```{r}
+control <- trainControl(method = "repeatedcv", 
+                        number = 5, 
+                        repeats = 2)
+
+tune_grid <- expand.grid(mtry = c(20:40))
+
+rf <- train(classe ~ ., 
+            data = data.train,
+            method = "rf",
+            ntree = 50,
+            importance = TRUE,
+            trControl = control,
+            tuneGrid = tune_grid)
+#plot(rf)
+plot(varImp(rf), top = 15, main = "Variable Importance of Classification Random Forest")
+```
+Variable importance graphs show that the main factors are num_window, roll_belt, magnet_dumbbell, pitch belt and pitch_forearm which validates the first simple tree.s
+
+Prediction of the model
+```{r}
+print("Training confusion matrix")
+predicted <- predict(rf, type = "raw")
+confusionMatrix(predicted, factor(data.train$classe)) 
+
+print("Test confusion matrix")
+predicted <- predict(rf, newdata = data.test, type = "raw")
+confusionMatrix(predicted, factor(data.test$classe)) 
+```
+The accuracy for the testing set shows 99.7%.
+Even though it took more time to build this model and the fact that random forest can be less interepretable than simple trees, we decide to stick with this last model because of its very high accuracy.
+
+## Test data
+
+Input the test data to predict the 20 outcomes
+```{r}
+dim(data_test)
+
+numeric.vars <-names(data_test)[sapply(data_test, class) %in% c("integer", "numeric")] 
+data.test.num <- data_test[, c(numeric.vars)] 
+
+valid.vars <-names(data.test.num)[colSums(is.na(data.test.num)) %in% c(0)]
+data.test.valid <- data.test.num[, valid.vars] 
+
+final.vars <- setdiff(colnames(data.test.valid),c("X","raw_timestamp_part_1","raw_timestamp_part_2"))
+data.test.final <- data.test.valid[, final.vars] 
+
+data.test.final <- data.test.final[,-c(54)]
+
+predicted <- predict(rf, newdata = data.test.final, type = "raw")
+predicted
+```
+The 20 predictions were correct validating the model chosen.
